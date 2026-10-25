@@ -5,8 +5,10 @@ The same processor runs whether events come from Kafka or from an in-memory repl
 
 Semantics
 - Window: [start, start + window_s) on *event time* (when the heartbeat happened), not arrival time.
-- Watermark: max event time seen so far minus `allowed_lateness_s`. A window is closed and emitted
-  once the watermark passes its end. Events for an already-closed window are *late*: they are not
+- Watermark: per input partition, the max event time seen; the stream's watermark is the *minimum*
+  across partitions, minus `allowed_lateness_s` (as Flink does). One fast partition can't close windows
+  that slower partitions are still filling; until every expected partition has delivered, nothing closes.
+  A window is closed and emitted once the watermark passes its end. Events for an already-closed window are *late*: they are not
   added to the emitted result (that would change a published number); they go to the late output,
   so nothing is silently lost.
 - Deduplication: the source delivers at least once. An event id seen before is dropped. Ids are kept
@@ -57,14 +59,16 @@ class Stats:
 
 class WindowAggregator:
     def __init__(self, window_s: int = 300, allowed_lateness_s: int = 120, alert_threshold: int = 6,
-                 dedup_retention_windows: int = 3):
+                 dedup_retention_windows: int = 3, partitions: int = 1):
         self.window_s = window_s
         self.lateness = allowed_lateness_s
         self.alert_threshold = alert_threshold
         self.retention = dedup_retention_windows * window_s
+        self.partitions = partitions
         self.open: dict[tuple[str, int], _Window] = {}
         self.seen: dict[str, int] = {}          # event_id -> event_ts
-        self.max_event_ts: int | None = None
+        self.partition_max: dict[int, int] = {} # partition -> max event_ts seen
+        self.max_event_ts: int | None = None    # min over partitions, once all have delivered
         self.closed_before = -1                 # every window starting before this is closed
         self.seq = 0
         self.stats = Stats()
@@ -76,7 +80,8 @@ class WindowAggregator:
     def watermark(self) -> int | None:
         return None if self.max_event_ts is None else self.max_event_ts - self.lateness
 
-    def process(self, event_id: str, device_id: str, site: str, event_ts: int, status: str) -> list[WindowResult]:
+    def process(self, event_id: str, device_id: str, site: str, event_ts: int, status: str,
+                partition: int = 0) -> list[WindowResult]:
         """Handle one event in arrival order. Returns windows closed by this event (possibly none)."""
         self.seq += 1
         st = self.stats
@@ -103,8 +108,10 @@ class WindowAggregator:
             w.degraded.add(device_id)
         st.counted += 1
 
-        if self.max_event_ts is None or event_ts > self.max_event_ts:
-            self.max_event_ts = event_ts
+        if event_ts > self.partition_max.get(partition, -1):
+            self.partition_max[partition] = event_ts
+            if len(self.partition_max) >= self.partitions:
+                self.max_event_ts = min(self.partition_max.values())
         st.max_open_windows = max(st.max_open_windows, len(self.open))
         return self._close_ready()
 

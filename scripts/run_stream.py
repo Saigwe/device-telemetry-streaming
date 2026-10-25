@@ -48,7 +48,8 @@ def kafka_events(consumer, idle_s: float, start_timeout_s: float = 120.0):
                 raise RuntimeError(m.error())
             e = json.loads(m.value())
             seq += 1
-            yield (seq, e["event_id"], e["device_id"], e["site"], e["event_ts"], e["status"], e["produced_at"])
+            yield (seq, e["event_id"], e["device_id"], e["site"], e["event_ts"], e["status"], e["produced_at"],
+                   m.partition())
 
 
 def main() -> None:
@@ -67,12 +68,12 @@ def main() -> None:
     sink = DuckDBSink(con, args.source)
     sink.reset()
     iceberg = IcebergSink(Path(args.iceberg_dir or Path(args.db).with_suffix("")) / "iceberg")
-    agg = WindowAggregator(alert_threshold=args.alert_threshold)
 
     pending_results, pending_alerts = [], []
     late_written = 0
     e2e_latency: list[float] = []
     consumer = None
+    partitions = 1
     if args.source == "kafka":
         from confluent_kafka import Consumer
 
@@ -81,6 +82,9 @@ def main() -> None:
                              # notice new topics/partitions within seconds (librdkafka default is 5 minutes)
                              "topic.metadata.refresh.interval.ms": 5000})
         consumer.subscribe([args.topic])
+        # The watermark waits for every partition (min of per-partition event time), so it needs the count.
+        partitions = len(consumer.list_topics(args.topic, timeout=10).topics[args.topic].partitions)
+    agg = WindowAggregator(alert_threshold=args.alert_threshold, partitions=partitions)
 
     def flush_batch():
         nonlocal pending_results, pending_alerts, late_written
@@ -99,8 +103,10 @@ def main() -> None:
     events = iter_events(con) if args.source == "replay" else kafka_events(consumer, args.idle_seconds)
     t0 = time.perf_counter()
     n = 0
-    for seq, event_id, device_id, site, event_ts, status, arrived in events:
-        closed = agg.process(event_id, device_id, site, int(event_ts), status)
+    for item in events:
+        seq, event_id, device_id, site, event_ts, status, arrived = item[:7]
+        partition = item[7] if len(item) > 7 else 0
+        closed = agg.process(event_id, device_id, site, int(event_ts), status, partition)
         if closed:
             pending_results.extend(closed)
             pending_alerts.extend(r for r in closed if r.failed_devices >= agg.alert_threshold)
@@ -122,7 +128,8 @@ def main() -> None:
 
     s = agg.stats
     summary = {
-        "run_id": run_id, "source": args.source, "events_received": s.received, "counted": s.counted,
+        "run_id": run_id, "source": args.source, "partitions": partitions,
+        "events_received": s.received, "counted": s.counted,
         "duplicates_dropped": s.duplicates, "late_to_side_output": s.late, "windows_emitted": s.windows_emitted,
         "alerts": s.alerts, "max_open_windows": s.max_open_windows, "max_dedup_ids": s.max_dedup_ids,
         "seconds": round(elapsed, 1), "events_per_second": round(s.received / elapsed) if elapsed else None,

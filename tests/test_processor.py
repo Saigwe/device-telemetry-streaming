@@ -80,6 +80,24 @@ def test_replaying_the_same_input_gives_the_same_results():
     assert runs[0] == runs[1]
 
 
+def test_fast_partition_does_not_close_windows_a_slow_partition_is_still_filling():
+    a = WindowAggregator(window_s=300, allowed_lateness_s=120, alert_threshold=99, partitions=2)
+    a.process("e1", "d1", "s1", T0 + 10, "ok", partition=0)
+    a.process("e2", "d2", "s1", T0 + 2000, "ok", partition=0)   # partition 0 races ahead
+    a.process("e3", "d3", "s1", T0 + 20, "ok", partition=1)     # partition 1 still in the first window
+    assert a.results == [] and a.stats.late == 0
+    a.process("e4", "d4", "s1", T0 + 2000, "ok", partition=1)   # now both are past it
+    first = [r for r in a.results if r.window_start == T0][0]
+    assert first.events == 2 and a.stats.late == 0
+
+
+def test_single_partition_watermark_is_unchanged():
+    a = agg()
+    a.process("e1", "d1", "s1", T0 + 10, "ok")
+    a.process("e2", "d2", "s1", T0 + 500, "ok")
+    assert [r.window_start for r in a.results] == [T0]
+
+
 def test_counted_plus_late_plus_duplicates_equals_received():
     a = agg()
     for i in range(1000):
