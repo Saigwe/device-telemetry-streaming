@@ -1,0 +1,7 @@
+version: 2
+models:
+  - name: rpt_site_status_5min
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [site_id, window_start]

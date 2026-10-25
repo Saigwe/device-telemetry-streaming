@@ -1,0 +1,21 @@
+version: 2
+models:
+- name: stg_bronze__devices
+  columns:
+  - name: device_id
+    data_tests:
+    - unique
+    - not_null
+- name: stg_bronze__heartbeats
+  columns:
+  - name: event_id
+    data_tests:
+    - unique
+    - not_null
+  - name: device_id
+    data_tests:
+    - not_null
+    - relationships:
+        arguments:
+          to: ref('stg_bronze__devices')
+          field: device_id

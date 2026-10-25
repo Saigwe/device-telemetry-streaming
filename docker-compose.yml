@@ -1,0 +1,7 @@
+# Local streaming stack (roadmap). Start with: docker compose up -d
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    command: [redpanda, start, --overprovisioned, --smp, "1", --memory, 1G, --node-id, "0",
+              --kafka-addr, "PLAINTEXT://0.0.0.0:9092", --advertise-kafka-addr, "PLAINTEXT://localhost:9092"]
+    ports: ["9092:9092", "8081:8081"]
