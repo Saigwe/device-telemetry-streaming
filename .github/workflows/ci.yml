@@ -37,18 +37,22 @@ jobs:
               --schema-registry-addr internal://0.0.0.0:8081
           for i in $(seq 1 60); do curl -sf localhost:8081/subjects && break; sleep 2; done
           docker exec redpanda rpk cluster info
-      - name: Build the heartbeat stream from the fixture
-        run: python scripts/prepare_source.py --db warehouse/kafka.duckdb --fixture --days 10
+      # The producer reads the event log from its own file: DuckDB lets one process write a file at a
+      # time, and the consumer is writing results to warehouse/kafka.duckdb while the producer runs.
+      - name: Build the heartbeat stream from the fixture (producer's input)
+        run: python scripts/prepare_source.py --db warehouse/source.duckdb --fixture --days 10
       - name: Create the topic and register the schema
-        run: python scripts/produce_kafka.py --db warehouse/kafka.duckdb --schema-registry http://localhost:8081 --create-topic-only
+        run: python scripts/produce_kafka.py --db warehouse/source.duckdb --schema-registry http://localhost:8081 --create-topic-only
       - name: Consume while producing, then reconcile in dbt
         run: |
           python scripts/run_stream.py --db warehouse/kafka.duckdb --source kafka --idle-seconds 15 > stream.json &
           consumer=$!
           sleep 5
-          python scripts/produce_kafka.py --db warehouse/kafka.duckdb
+          python scripts/produce_kafka.py --db warehouse/source.duckdb
           wait $consumer
           cat stream.json
+          # rebuild the same (deterministic) event log next to the stream's results for the batch reference
+          python scripts/prepare_source.py --db warehouse/kafka.duckdb --fixture --days 10
           cd dbt && DUCKDB_PATH=../warehouse/kafka.duckdb dbt build --profiles-dir .
       - name: Schema registered
         run: curl -s localhost:8081/subjects/device.heartbeats-value/versions/latest
