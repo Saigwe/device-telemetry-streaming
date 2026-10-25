@@ -2,85 +2,130 @@
 
 [![CI](https://github.com/Saigwe/device-telemetry-streaming/actions/workflows/ci.yml/badge.svg)](https://github.com/Saigwe/device-telemetry-streaming/actions/workflows/ci.yml)
 
-> Device heartbeats streamed through Kafka with windowed failure alerts, watermarks for late data and deduplication for effectively-once results, plus a batch reference implementation that proves the streaming numbers.
+> Device heartbeats processed as a stream, using event-time windows with a watermark, deduplication, a late-data side output and threshold alerts. CI runs it end to end through Kafka (Redpanda, with schema registry). Locally it processes 30.7 million real heartbeats in 3.5 minutes, and every window reconciles to a batch reference.
 
 **Author:** Stanley Igwe, Lead Data (Analytics) Engineer · [Portfolio](https://saigwe.github.io)
-**Stack:** Kafka (Redpanda in Docker) · Apache Flink or Spark Structured Streaming · Apache Iceberg or ClickHouse · Grafana · dbt Core (batch reference)
-**Status:** 🚧 Scaffolded. Fixture pipeline passes: `dbt build` 11/11. See [Roadmap](#roadmap).
+**Stack:** Python · Kafka API (Redpanda) · Apache Iceberg (pyiceberg) · DuckDB · dbt Core · Streamlit · pytest · GitHub Actions
+**Status:** Core build complete and run on a full real quarter. See [Roadmap](#roadmap) for Flink, ClickHouse and Grafana.
 
-Project 7 of my portfolio plan. The streaming version of the device-estate reporting I led at a workplace-communications hardware company: alerts as devices fail, not the next day. This repo rebuilds the problem on public and synthetic data. No employer or client data, code or logic is used.
+This is the streaming version of the device-estate reporting I led at a workplace-communications hardware company: alerts as devices fail, not in the next day's report. The data is Backblaze's real drive fleet (project 5 of my plan), replayed as heartbeats; no employer data is used.
 
 ---
 
 ## 90-second summary
 | | |
 |---|---|
-| **Problem** | TODO: one sentence on the business problem. |
-| **What I built** | TODO: fill in as the roadmap lands. |
-| **Why it matters** | TODO: the decision this enables, in the user's words. |
-| **Proof** | TODO: link to [Numbers](#numbers), with every claim reproducible. |
+| **Problem** | A daily batch report tells operations about failing devices a day late. Moving to streaming brings three new problems: events arrive out of order, some arrive twice, and some arrive after their window has been published. |
+| **What I built** | A stream processor: event-time 5-minute windows per site, a watermark with 120 s allowed lateness, dedup on event id, a late-event side output and threshold alerts. It writes to an idempotent serving table and an Iceberg history table, with a dbt batch reference that the stream must reconcile to. |
+| **Why it matters** | Operations get alerts within minutes, and the live numbers can be trusted because every event is accounted for. Published numbers never change after the fact, and a crash or replay can't double-count. |
+| **Proof** | 30,750,460 deliveries at 148k events/s. Every one of the 540 windows reconciles (stream + late = batch, 0 unexplained), and the batch matches Backblaze's 1,030 failures exactly. Kafka is tested end to end in CI. See [Numbers](#numbers). |
 
 ## Architecture
 ```mermaid
 flowchart LR
-  R[Real data source<br/>see Data] -.->|roadmap| B[(bronze)]
-  F[tests/fixtures/make_fixture.py<br/>synthetic fixture] --> B
-  B -->|dbt staging| S[(silver<br/>stg_* views, keys tested)]
-  S -->|dbt marts| G[(gold<br/>facts and reports)]
+  BB[Backblaze drive-days<br/>30.6M, from project 5] -->|prepare_source.py<br/>replay.py| L[(bronze.heartbeat_events<br/>arrival order: jitter,<br/>1% late, 0.5% redelivered)]
+  L -->|produce_kafka.py<br/>keyed by device| K[[Kafka topic device.heartbeats<br/>3 partitions · JSON schema in registry]]
+  K -->|consumer, commit after sink| P
+  L -->|replay source| P[WindowAggregator<br/>event-time windows · watermark<br/>dedup · alerts]
+  P --> S[(stream.window_results<br/>idempotent upsert)]
+  P --> A[(stream.alerts)]
+  P --> LT[(stream.late_events<br/>side output)]
+  P --> I[(Iceberg<br/>window_history)]
+  L --> B[dbt: rpt_site_status_5min_batch]
+  S & LT & B --> R[dbt: rpt_stream_vs_batch<br/>stream + late = batch]
+  S & A --> D[Streamlit live dashboard]
 ```
 
-## Data
-A Python producer replays [Backblaze](https://www.backblaze.com/cloud-storage/resources/hard-drive-test-data) data or simulated heartbeats at speed, with duplicate and out-of-order events on purpose. CI checks the batch reference implementation on a synthetic fixture with planted duplicates and late events.
+## How the stream works
+- **Time compression:** one Backblaze day becomes one 5-minute window per datacenter (site). The stream's failure counts can then be checked against the real daily failures.
+- **Messy delivery, on purpose:**
+  - every event arrives 0–20 s after it happened
+  - 1% arrive 150–600 s late
+  - 0.5% are delivered twice (at-least-once)
+  - in Kafka mode, 3 partitions interleave the order further
+- **Watermark** = max event time seen − 120 s. A window is published when the watermark passes its end. Events for an already-published window go to `stream.late_events`; they are not merged in, because a number someone may have acted on shouldn't silently change.
+- **Effectively-once:**
+  1. Offsets are committed only after the sink write.
+  2. Event ids are deduplicated.
+  3. The serving table is upserted by (site, window_start).
 
-| Bronze table (fixture) | Rows |
-|---|---|
-| `bronze.devices` | 200 |
-| `bronze.heartbeats` | 20,000 + 300 planted duplicates |
+  A crash replays input but can't double-count. A test shows replaying the same input, part of it twice, gives identical results.
+- **Iceberg history:** every micro-batch is an append commit (90 snapshots on the full run), so you can see what was published when.
+- **Trade-offs** (batch vs streaming, lateness vs latency, exactly-once vs effectively-once, what changes at 10×) are in the [design doc](docs/design_doc.md).
 
-## Data model (gold layer, first cut)
-| Model | Purpose |
-|---|---|
-| `rpt_site_status_5min` | Batch reference for the streaming job: 5-minute windows per site on event time. |
-
-## Tests in place
-- Staging: `unique` / `not_null` on every key, and `relationships` on every foreign key
-- Marts: grain tests (`unique_combination`) and accepted values
-- Business rules: `assert_late_events_not_more_than_events`
+## Tests
+- **pytest, 8 tests on the engine:**
+  - windows close only after the watermark passes
+  - out-of-order events within the lateness are counted
+  - late events go to the side output, not the result
+  - duplicates are dropped
+  - distinct failed devices per site
+  - alerts fire at the threshold
+  - replay is deterministic
+  - received = counted + late + duplicates
+- **dbt reconciliation:**
+  - `assert_stream_reconciles_to_batch`: in every window, batch events = stream events + late events, and failed devices differ only by late failures
+  - `assert_batch_matches_source`: after dedup, every window holds exactly one heartbeat per drive-day and its failures equal the datacenter-day's failures in the source
+  - `assert_no_duplicate_published_windows`
+- **Mutation check:** deleting 5 late events from the side output makes the reconciliation fail in 3 windows, as it should.
+- **CI has two jobs:**
+  - replay + dbt
+  - a real Kafka run: Redpanda in Docker, JSON schema registered, a 3-partition topic, consumer and producer running together, then the same dbt reconciliation
 
 ## Numbers
-*(Fill from real runs. Never estimate.)*
+Full real-data run on a Windows laptop: Backblaze Q1 2026, 90 days. Reproduce with `make all` after building project 5's warehouse.
+
 | Metric | Value |
 |---|---|
-| Rows processed (real data) | _tbd_ |
-| dbt models / tests | _tbd_ |
-| `dbt build` runtime | _tbd_ |
+| Drive-days replayed / deliveries (incl. redeliveries) | 30,597,484 / 30,750,460 |
+| Duplicates dropped | 152,976 |
+| Late events to side output (arrived after their window closed) | 220,306 (0.72%) |
+| Counted live | 30,377,178 |
+| Windows published (6 sites × 90) | 540 |
+| **Reconciliation: unexplained events across all windows** | **0** |
+| Failures: counted live / arrived late / total (= Backblaze's count) | 1,023 / 7 / **1,030** |
+| Alerts (≥ 6 failed devices in a site-window) | 41: sac2 21, phx1 9, sac0 7, iad1 3, ams5 1 |
+| Processing time / throughput | 207 s / **148,463 events/s** (single Python process) |
+| Publish delay after window end (simulated time, p50 and p95) | 120 s / 120 s (= the allowed lateness) |
+| Peak state: open windows / dedup ids | 12 / 1.5M |
+| Iceberg snapshots (one per micro-batch) | 90 |
+| Prepare 30.6M drive-days into the event log / dbt reconciliation | 208 s / 8 s |
+
+The 7 late failures show the trade-off in the design doc in practice. The live view missed them when it published, and the batch reference has them. A longer allowed lateness would catch more, but every window would publish later.
 
 ## How to run
 Requires **Python 3.12** (what CI uses) and `make`, or run the commands in the `Makefile` by hand.
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-make fixture-all   # synthetic fixture -> dbt build (used in CI)
+make all            # real data: needs ../device-fleet-reliability/warehouse/fleet.duckdb (project 5)
+make fixture-all    # synthetic drive-days (CI)
+pip install streamlit && make dashboard
+```
+Through Kafka (needs Docker):
+```bash
+pip install -r requirements-kafka.txt && docker compose up -d
+python scripts/run_stream.py --db warehouse/telemetry.duckdb --source kafka &
+python scripts/produce_kafka.py --db warehouse/telemetry.duckdb --schema-registry http://localhost:8081
 ```
 
 ## Roadmap
-- [x] Scaffold: synthetic fixture, staging with key tests, first marts and business-rule tests, CI
-- [ ] Producer: replay heartbeats to a Redpanda topic, with a schema in the schema registry
-- [ ] Streaming job: 5-minute windows per site with a 2-minute watermark and dedup on event_id
-- [ ] Sinks: Iceberg for history, ClickHouse for the live Grafana dashboard
-- [ ] Alert when the failed-device count in a window breaches a threshold
-- [ ] Compare streaming output with the dbt batch reference (`rpt_site_status_5min`) and report any mismatch
-- [ ] Design doc: batch vs streaming trade-offs, exactly-once vs effectively-once, end-to-end latency
-- [ ] Fill in [Numbers](#numbers) and the [design doc](docs/design_doc.md)
-- [ ] 3-minute Loom walkthrough
+- [x] Replay of real heartbeats with jitter, late arrivals and redeliveries; Kafka producer with a JSON schema in the registry
+- [x] Event-time windows, watermark, dedup, late side output, alerts (pytest)
+- [x] Idempotent serving sink and Iceberg history; commit-after-sink consumer
+- [x] dbt batch reference and stream-vs-batch reconciliation, checked against the source
+- [x] Design doc: batch vs streaming, lateness vs latency, exactly-once vs effectively-once
+- [ ] Run on Apache Flink (keyed state, per-partition watermarks) and compare results
+- [ ] ClickHouse serving table and a Grafana dashboard (needs Docker locally)
+- [ ] Alerts as a rate per 1,000 devices on site, not a fixed count
 
 ## Interview topics this project prepares
-- Event time vs processing time
-- Watermarks and late data
-- Exactly-once and idempotent sinks
-- Streaming system design
+- Event time vs processing time; watermarks and late data
+- At-least-once delivery, deduplication and idempotent sinks (effectively-once)
+- Kafka partitioning and keys; schema registry
+- Proving a stream correct against a batch reference
+- Streaming system design trade-offs
 
 ## Data and licence
-- **Fixture:** synthetic, generated with a fixed seed by `tests/fixtures/make_fixture.py` from `fixture_spec.yml`. It describes no real company or person.
-- **Real data:** see [Data](#data) for each source's own licence and terms.
+- **Data:** [Backblaze Drive Stats](https://www.backblaze.com/cloud-storage/resources/hard-drive-test-data), © Backblaze, used as Backblaze asks: cited as the source and not sold. The heartbeat timing and delivery faults are simulated.
 - **Code:** MIT (see `LICENSE`).

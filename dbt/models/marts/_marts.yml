@@ -1,7 +1,20 @@
 version: 2
+
 models:
-  - name: rpt_site_status_5min
+  - name: rpt_site_status_5min_batch
+    description: Batch reference per site and 5-minute window (all data, deduplicated).
     data_tests:
       - unique_combination:
           arguments:
-            columns: [site_id, window_start]
+            columns: [site, window_start]
+  - name: rpt_stream_vs_batch
+    description: Stream output reconciled to the batch reference per window.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [site, window_start]
+  - name: rpt_source_failures_by_site_day
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [site, window_start]

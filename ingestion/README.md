@@ -1,5 +1,8 @@
-# Ingestion (roadmap)
+# Ingestion
 
-Loaders for the real data go here and write to the same `bronze` tables as the fixture.
+There's no separate loader here; the stream's input is built by `scripts/prepare_source.py`:
 
-A Python producer replays [Backblaze](https://www.backblaze.com/cloud-storage/resources/hard-drive-test-data) data or simulated heartbeats at speed, with duplicate and out-of-order events on purpose. CI checks the batch reference implementation on a synthetic fixture with planted duplicates and late events.
+1. **Copy the drive-days to replay** into `bronze.source_drive_days`. They come from project 5's warehouse ([device-fleet-reliability](https://github.com/Saigwe/device-fleet-reliability), Backblaze Drive Stats); `--fixture` makes synthetic ones for CI instead.
+2. **Turn them into deliveries** in `bronze.heartbeat_events`, in arrival order, using `telemetry/replay.py`. Delivery is deliberately messy: jitter, late arrivals and redeliveries.
+
+`scripts/produce_kafka.py` publishes those deliveries to Kafka; the `replay` source reads them directly.

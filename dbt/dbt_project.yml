@@ -1,19 +1,18 @@
 name: device_telemetry_streaming
-version: 0.1.0
+version: 0.2.0
 config-version: 2
 profile: device_telemetry_streaming
-model-paths:
-- models
-macro-paths:
-- macros
-test-paths:
-- tests
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
 target-path: target
-clean-targets:
-- target
-- dbt_packages
+clean-targets: ["target", "dbt_packages"]
+
 vars:
-  watermark_minutes: 2
+  window_seconds: 300          # must match the stream processor
+  sim_start: "2026-01-01 00:00:00"
+
 models:
   device_telemetry_streaming:
     staging:

@@ -6,7 +6,8 @@ on:
   pull_request:
 
 jobs:
-  build:
+  replay:
+    name: Processor tests + replay + dbt reconciliation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,5 +16,36 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Fixture pipeline (synthetic fixture -> dbt build with tests)
-        run: make fixture-all
+      - run: make fixture-all
+
+  kafka:
+    name: End to end through Kafka (Redpanda)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-kafka.txt
+      - name: Start Redpanda (Kafka API on 9092, schema registry on 8081)
+        run: |
+          docker run -d --name redpanda -p 9092:9092 -p 8081:8081 \
+            docker.redpanda.com/redpandadata/redpanda:v26.1.18 \
+            redpanda start --mode dev-container --smp 1 \
+              --kafka-addr internal://0.0.0.0:9092 --advertise-kafka-addr internal://localhost:9092 \
+              --schema-registry-addr internal://0.0.0.0:8081
+          for i in $(seq 1 60); do curl -sf localhost:8081/subjects && break; sleep 2; done
+          docker exec redpanda rpk cluster info
+      - name: Build the heartbeat stream from the fixture
+        run: python scripts/prepare_source.py --db warehouse/kafka.duckdb --fixture --days 10
+      - name: Consume while producing, then reconcile in dbt
+        run: |
+          python scripts/run_stream.py --db warehouse/kafka.duckdb --source kafka --idle-seconds 15 > stream.json &
+          sleep 3
+          python scripts/produce_kafka.py --db warehouse/kafka.duckdb --schema-registry http://localhost:8081
+          wait
+          cat stream.json
+          cd dbt && DUCKDB_PATH=../warehouse/kafka.duckdb dbt build --profiles-dir .
+      - name: Schema registered
+        run: curl -s localhost:8081/subjects/device.heartbeats-value/versions/latest

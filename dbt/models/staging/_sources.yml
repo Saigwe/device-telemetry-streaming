@@ -1,7 +1,18 @@
 version: 2
+
 sources:
-- name: bronze
-  description: Raw tables, loaded by the fixture generator (CI) or the real-data loaders.
-  tables:
-  - name: devices
-  - name: heartbeats
+  - name: bronze
+    description: Replay inputs (scripts/prepare_source.py).
+    tables:
+      - name: source_drive_days
+        description: The drive-days being replayed (Backblaze Drive Stats, or the CI fixture).
+      - name: heartbeat_events
+        description: Every delivery in arrival order (the topic's contents), including redeliveries and late arrivals.
+  - name: stream
+    description: Output of the stream processor (scripts/run_stream.py).
+    tables:
+      - name: window_results
+        description: One row per site and 5-minute window, as published by the stream.
+      - name: late_events
+        description: Events that arrived after their window had closed (side output).
+      - name: alerts

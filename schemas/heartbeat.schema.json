@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DeviceHeartbeat",
+  "description": "One device status report. event_ts is when it happened (event time); produced_at is when it was sent.",
+  "type": "object",
+  "properties": {
+    "event_id": {"type": "string", "description": "Unique per heartbeat; redeliveries reuse it (dedup key)"},
+    "device_id": {"type": "string"},
+    "site": {"type": "string"},
+    "event_ts": {"type": "integer", "description": "Epoch seconds, event time"},
+    "status": {"type": "string", "enum": ["ok", "degraded", "failed"]},
+    "produced_at": {"type": "number", "description": "Epoch seconds when the producer sent it"}
+  },
+  "required": ["event_id", "device_id", "site", "event_ts", "status", "produced_at"],
+  "additionalProperties": false
+}
