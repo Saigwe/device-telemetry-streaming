@@ -39,12 +39,15 @@ jobs:
           docker exec redpanda rpk cluster info
       - name: Build the heartbeat stream from the fixture
         run: python scripts/prepare_source.py --db warehouse/kafka.duckdb --fixture --days 10
+      - name: Create the topic and register the schema
+        run: python scripts/produce_kafka.py --db warehouse/kafka.duckdb --schema-registry http://localhost:8081 --create-topic-only
       - name: Consume while producing, then reconcile in dbt
         run: |
           python scripts/run_stream.py --db warehouse/kafka.duckdb --source kafka --idle-seconds 15 > stream.json &
-          sleep 3
-          python scripts/produce_kafka.py --db warehouse/kafka.duckdb --schema-registry http://localhost:8081
-          wait
+          consumer=$!
+          sleep 5
+          python scripts/produce_kafka.py --db warehouse/kafka.duckdb
+          wait $consumer
           cat stream.json
           cd dbt && DUCKDB_PATH=../warehouse/kafka.duckdb dbt build --profiles-dir .
       - name: Schema registered

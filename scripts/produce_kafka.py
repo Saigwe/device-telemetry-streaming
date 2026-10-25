@@ -41,6 +41,8 @@ def main() -> None:
     ap.add_argument("--topic", default="device.heartbeats")
     ap.add_argument("--partitions", type=int, default=3)
     ap.add_argument("--schema-registry", default=None)
+    ap.add_argument("--create-topic-only", action="store_true",
+                    help="create the topic and register the schema, then exit (run before starting consumers)")
     args = ap.parse_args()
 
     from confluent_kafka import Producer
@@ -51,6 +53,9 @@ def main() -> None:
         admin.create_topics([NewTopic(args.topic, num_partitions=args.partitions, replication_factor=1)])[args.topic].result()
     if args.schema_registry:
         print(f"registered schema id {register_schema(args.schema_registry, args.topic + '-value')}")
+    if args.create_topic_only:
+        print(f"topic {args.topic} ready")
+        return
 
     required = set(SCHEMA["required"])
     producer = Producer({"bootstrap.servers": args.bootstrap, "linger.ms": 20, "enable.idempotence": True})

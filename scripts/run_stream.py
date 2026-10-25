@@ -77,7 +77,9 @@ def main() -> None:
         from confluent_kafka import Consumer
 
         consumer = Consumer({"bootstrap.servers": args.bootstrap, "group.id": f"telemetry-{run_id}",
-                             "auto.offset.reset": "earliest", "enable.auto.commit": False})
+                             "auto.offset.reset": "earliest", "enable.auto.commit": False,
+                             # notice new topics/partitions within seconds (librdkafka default is 5 minutes)
+                             "topic.metadata.refresh.interval.ms": 5000})
         consumer.subscribe([args.topic])
 
     def flush_batch():
@@ -115,6 +117,8 @@ def main() -> None:
     elapsed = time.perf_counter() - t0
     if consumer is not None:
         consumer.close()
+    if agg.stats.received == 0:
+        sys.exit("FAIL: no events received (is the topic there, and is the producer running?)")
 
     s = agg.stats
     summary = {
