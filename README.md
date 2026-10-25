@@ -18,7 +18,7 @@ This is the streaming version of the device-estate reporting I led at a workplac
 | **Problem** | A daily batch report tells operations about failing devices a day late. Moving to streaming brings three new problems: events arrive out of order, some arrive twice, and some arrive after their window has been published. |
 | **What I built** | A stream processor: event-time 5-minute windows per site, a watermark with 120 s allowed lateness, dedup on event id, a late-event side output and threshold alerts. It writes to an idempotent serving table and an Iceberg history table, with a dbt batch reference that the stream must reconcile to. |
 | **Why it matters** | Operations get alerts within minutes, and the live numbers can be trusted because every event is accounted for. Published numbers never change after the fact, and a crash or replay can't double-count. |
-| **Proof** | 30,750,460 deliveries at 148k events/s. Every one of the 540 windows reconciles (stream + late = batch, 0 unexplained), and the batch matches Backblaze's 1,030 failures exactly. Kafka is tested end to end in CI. See [Numbers](#numbers). |
+| **Proof** | 30,750,460 deliveries at 148k events/s. Every one of the 540 windows reconciles (stream + late = batch, 0 unexplained), and the batch matches Backblaze's 1,030 failures exactly. Through real Kafka in CI, per-partition watermarks cut late events from 59% to 0.3%, with 0.4 s median latency. See [Numbers](#numbers). |
 
 ## Architecture
 ```mermaid
@@ -43,7 +43,7 @@ flowchart LR
   - 1% arrive 150–600 s late
   - 0.5% are delivered twice (at-least-once)
   - in Kafka mode, 3 partitions interleave the order further
-- **Watermark** = max event time seen − 120 s. A window is published when the watermark passes its end. Events for an already-published window go to `stream.late_events`; they are not merged in, because a number someone may have acted on shouldn't silently change.
+- **Watermark** = the minimum, across Kafka partitions, of each partition's latest event time, minus 120 s (per-partition watermarks, as in Flink). A window is published when the watermark passes its end. Taking the minimum stops one fast partition from closing windows the others are still filling. Events for an already-published window go to `stream.late_events`; they are not merged in, because a number someone may have acted on shouldn't silently change.
 - **Effectively-once:**
   1. Offsets are committed only after the sink write.
   2. Event ids are deduplicated.
@@ -54,7 +54,7 @@ flowchart LR
 - **Trade-offs** (batch vs streaming, lateness vs latency, exactly-once vs effectively-once, what changes at 10×) are in the [design doc](docs/design_doc.md).
 
 ## Tests
-- **pytest, 8 tests on the engine:**
+- **pytest, 10 tests on the engine:**
   - windows close only after the watermark passes
   - out-of-order events within the lateness are counted
   - late events go to the side output, not the result
@@ -62,6 +62,7 @@ flowchart LR
   - distinct failed devices per site
   - alerts fire at the threshold
   - replay is deterministic
+  - a fast partition doesn't close a slow partition's windows
   - received = counted + late + duplicates
 - **dbt reconciliation:**
   - `assert_stream_reconciles_to_batch`: in every window, batch events = stream events + late events, and failed devices differ only by late failures
@@ -93,6 +94,16 @@ Full real-data run on a Windows laptop: Backblaze Q1 2026, 90 days. Reproduce wi
 
 The 7 late failures show the trade-off in the design doc in practice. The live view missed them when it published, and the batch reference has them. A longer allowed lateness would catch more, but every window would publish later.
 
+**Through real Kafka (CI, Redpanda, 3 partitions, fixture stream of 39,929 deliveries):**
+
+| | First Kafka run (single watermark) | With per-partition watermarks |
+|---|---|---|
+| Late events to side output | 23,710 (59.4%) | **115 (0.29%)** |
+| Reconciles to batch | yes | yes |
+| Producer-to-published latency, p50 / p95 | not measured | **0.41 s / 1.41 s** |
+
+The first run reconciled (every event was accounted for), but 59% of events arrived "late". The producer had published everything in 0.4 s, so the consumer read one partition ahead of the others, and the watermark followed the fastest one. Taking the minimum across partitions fixed it. The replay never showed the problem, because it has a single ordered input, which is why the Kafka path is tested on its own in CI. Kafka-mode throughput (about 1.9k events/s) includes 15 s of idle wait at the end of the bounded run, so it isn't a capacity figure.
+
 ## How to run
 Requires **Python 3.12** (what CI uses) and `make`, or run the commands in the `Makefile` by hand.
 ```bash
@@ -115,7 +126,9 @@ python scripts/produce_kafka.py --db warehouse/telemetry.duckdb --schema-registr
 - [x] Idempotent serving sink and Iceberg history; commit-after-sink consumer
 - [x] dbt batch reference and stream-vs-batch reconciliation, checked against the source
 - [x] Design doc: batch vs streaming, lateness vs latency, exactly-once vs effectively-once
-- [ ] Run on Apache Flink (keyed state, per-partition watermarks) and compare results
+- [x] Per-partition watermarks (found and fixed through the Kafka CI run)
+- [ ] Idle-partition handling (a partition with no traffic currently holds the watermark back)
+- [ ] Run on Apache Flink (keyed state) and compare results
 - [ ] ClickHouse serving table and a Grafana dashboard (needs Docker locally)
 - [ ] Alerts as a rate per 1,000 devices on site, not a fixed count
 

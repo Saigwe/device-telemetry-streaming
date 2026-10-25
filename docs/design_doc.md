@@ -43,7 +43,7 @@
 | Live serving | ClickHouse + Grafana / DuckDB + Streamlit | DuckDB + Streamlit here | No Docker on the build machine. The serving table is the same shape ClickHouse would hold |
 
 ## 5. Risks and what I'd change at 10× scale
-- **One process.** The engine runs single-threaded. At 10× I'd move to Flink (or Kafka Streams) with keyed state per site, or run one consumer per partition with per-partition watermarks merged by min().
-- **Watermark from one fast partition** can close windows early for slower partitions. Per-partition watermarks fix this. Today it shows up as more late events in Kafka mode than in the ordered replay.
+- **One process.** The engine runs single-threaded. At 10× I'd move to Flink (or Kafka Streams) with keyed state per site.
+- **Watermark from one fast partition**: this happened in the first Kafka CI run, with 59% of events marked late. The fix is now implemented: the watermark is the minimum of per-partition event time, which brought late events down to 0.29%. The remaining risk is an **idle partition**: one with no traffic holds the watermark back. Flink handles that with an idleness timeout, which is the next change.
 - **Dedup state in memory.** At scale it goes in RocksDB or Flink state, with a TTL.
 - **Alert threshold** is a fixed count. A rate per 1,000 devices on site would compare sites of different sizes fairly.
