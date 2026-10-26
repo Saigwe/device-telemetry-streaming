@@ -131,6 +131,7 @@ python scripts/produce_kafka.py --db warehouse/telemetry.duckdb --schema-registr
 - [ ] Run on Apache Flink (keyed state) and compare results
 - [ ] ClickHouse serving table and a Grafana dashboard (needs Docker locally)
 - [ ] Alerts as a rate per 1,000 devices on site, not a fixed count
+- [ ] 3-minute Loom walkthrough ([script ready](docs/walkthrough.md))
 
 ## Interview topics this project prepares
 - Event time vs processing time; watermarks and late data
